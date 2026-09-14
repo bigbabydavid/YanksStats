@@ -422,6 +422,16 @@
             <button type="button" id="modalRankApply" class="modal-split-btn" hidden disabled>Apply</button>
           </div>
         </div>
+        <div id="modalAwardsSection">
+          <div class="modal-hitline">Awards</div>
+          <div class="modal-export-row">
+            <button type="button" id="modalAwardsFind" class="modal-split-btn">Find Awards</button>
+          </div>
+          <select id="modalAwardsSelect" class="modal-matchup-input" hidden></select>
+          <div class="modal-export-row">
+            <button type="button" id="modalAwardsApply" class="modal-split-btn" hidden disabled>Apply</button>
+          </div>
+        </div>
         <div id="modalMatchupSection">
           <div class="modal-hitline" id="modalMatchupLabel">Career vs. a specific opponent</div>
           <input type="text" id="modalMatchupSearch" class="modal-matchup-input" autocomplete="off">
@@ -1188,6 +1198,67 @@ const RANK_CATEGORIES_PIT = [
   ['saves', 'Saves', 'saves'], ['strikeouts', 'Strikeouts', 'strikeOuts'],
 ];
 const RANK_NOTABLE_MAX = 10;  // only ranks at or better than this count as "notable"
+
+// Confirmed live against MLB's hydrate=awards: it returns a full history including minor-league
+// honors (86 entries for one star player — SAL/INT/AFL organizational all-stars, MiLB.com honors,
+// etc.), which is far too noisy for a broadcast. This whitelists specific major-award name patterns;
+// everything else is dropped unless it's a recent (within the window below) monthly/weekly honor.
+// Also confirmed: MLB's API has no award-voting-placement data at all (checked a specific award's
+// recipients endpoint — winner only, no runner-up info — and searched the full 682-entry award
+// catalog for anything voting/placement-related; nothing exists), so "3rd in Cy Young voting"
+// style results genuinely can't be built from this data source.
+const MAJOR_AWARD_PATTERNS = [
+  /^(AL|NL) MVP$/i, /^(AL|NL) Cy Young$/i, /^(AL|NL) Rookie of the Year$/i,
+  /Jackie Robinson (AL|NL)? ?Rookie of the Year/i, /^(AL|NL) All-Star$/i,
+  /Gold Glove/i, /Silver Slugger/i, /Home Run Derby Winner/i,
+  /^(AL|NL)CS MVP$/i, /World Series MVP/i, /All-Star.*MVP/i,
+  /Manager of the Year/i, /Comeback Player of the Year/i, /Reliever of the Year/i,
+  /Roberto Clemente Award/i, /Hank Aaron Award/i,
+];
+const RECENT_AWARD_PATTERNS = [/Player of the (Week|Month)$/i, /Rookie of the (Week|Month)$/i, /Pitcher of the (Week|Month)$/i];
+const RECENT_AWARD_WINDOW_DAYS = 365;
+
+async function fetchPlayerAwards(pid) {
+  const d = await jc(`${API}/people/${pid}?hydrate=awards`).catch(() => null);
+  const p = d && d.people && d.people[0];
+  return (p && p.awards) || [];
+}
+
+function filterNotableAwards(awards) {
+  const cutoff = Date.now() - RECENT_AWARD_WINDOW_DAYS * 24 * 60 * 60 * 1000;
+  return awards.filter(a => {
+    if (MAJOR_AWARD_PATTERNS.some(re => re.test(a.name))) return true;
+    if (RECENT_AWARD_PATTERNS.some(re => re.test(a.name))) {
+      const t = Date.parse(a.date);
+      return !isNaN(t) && t >= cutoff;
+    }
+    return false;
+  });
+}
+
+// Individual instances first (as requested), with a grouped "Nx Award Name" option appended for
+// anything won more than once — an addition alongside the individual entries, not a replacement.
+function buildAwardOptions(awards) {
+  const sorted = [...awards].sort((a, b) =>
+    (b.season || '').localeCompare(a.season || '') || (Date.parse(b.date) || 0) - (Date.parse(a.date) || 0));
+  const individual = sorted.map(a => ({ kind: 'single', name: a.name, season: a.season }));
+  const counts = new Map();
+  sorted.forEach(a => counts.set(a.name, (counts.get(a.name) || 0) + 1));
+  const grouped = [...counts.entries()].filter(([, n]) => n > 1).map(([name, n]) => ({ kind: 'group', name, count: n }));
+  return [...individual, ...grouped];
+}
+
+function buildAwardGraphicData(splitKey) {
+  const [, kind, nameEnc, valueRaw] = splitKey.split(':');
+  const name = decodeURIComponent(nameEnc);
+  if (kind === 'group') {
+    const label = `${valueRaw}x ${name}`;
+    return { label, sentenceMode: true, cells: [[name.toUpperCase(), `${valueRaw}X`]] };
+  }
+  const label = `${valueRaw} ${name}`;
+  return { label, sentenceMode: true, cells: [[name.toUpperCase(), valueRaw]] };
+}
+
 const POSITION_RANK_NOTABLE_MAX = 5;   // errors/OAA are scoped tighter — top or bottom 5 at the position
 const POSITION_ERROR_QUALIFY_INNINGS = 300;  // roughly a season of semi-regular defensive work at one spot
 const POSITION_OAA_QUALIFY_ATTEMPTS = 50;    // a meaningful Statcast defensive sample
@@ -1588,6 +1659,7 @@ async function buildSplitData(row, pid, splitKey) {
   if (splitKey.startsWith('vs:')) return buildMatchupGraphicData(row, pid, splitKey);
   if (splitKey.startsWith('stat:')) return buildStatTileGraphicData(splitKey);
   if (splitKey.startsWith('rank:')) return buildRankGraphicData(splitKey);
+  if (splitKey.startsWith('award:')) return buildAwardGraphicData(splitKey);
   if (splitKey.startsWith('posrank:')) return buildPositionRankGraphicData(splitKey);
   if (splitKey.startsWith('team:')) return buildTeamGraphicData(row, splitKey);
   if (CAREER_SPLIT_SITCODE[splitKey]) return buildCareerSplitGraphicData(row, pid, splitKey);
@@ -1604,7 +1676,7 @@ async function buildSplitData(row, pid, splitKey) {
 // season" without parsing every box score of the year, so it doesn't get the rest of the UI at all.
 function setModalMode(mode) {
   const playerOnly = ['modalCareerSplitsSection', 'modalComparisonsSection', 'modalTeamTenureSection',
-    'modalCustomRangeSection', 'modalLastNSection', 'modalMatchupSection', 'modalDownloadSection'];
+    'modalCustomRangeSection', 'modalLastNSection', 'modalMatchupSection', 'modalDownloadSection', 'modalAwardsSection'];
   playerOnly.forEach(id => { $(id).hidden = mode !== 'player'; });
   const coreVisible = mode === 'player' || mode === 'teamTotal';
   $('modalSplit').hidden = !coreVisible;
@@ -2081,6 +2153,45 @@ async function openPlayerModal(pid) {
     pushSplit(pid, modalSplitKey);
   };
 
+  let modalAwardOptions = [];
+  $('modalAwardsSelect').hidden = true;
+  $('modalAwardsApply').hidden = true;
+  $('modalAwardsFind').textContent = 'Find Awards';
+  $('modalAwardsFind').disabled = false;
+  $('modalAwardsFind').onclick = async () => {
+    const btn = $('modalAwardsFind'), note = $('modalDlNote');
+    btn.disabled = true; btn.textContent = 'Searching…';
+    note.textContent = '';
+    const raw = await fetchPlayerAwards(pid).catch(() => []);
+    if (modalPid !== pid) return;  // player changed while this was in flight
+    btn.disabled = false; btn.textContent = 'Find Awards';
+    modalAwardOptions = buildAwardOptions(filterNotableAwards(raw));
+    if (!modalAwardOptions.length) {
+      $('modalAwardsSelect').hidden = true;
+      $('modalAwardsApply').hidden = true;
+      note.textContent = 'No notable awards found.';
+      return;
+    }
+    $('modalAwardsSelect').innerHTML = modalAwardOptions.map((o, i) =>
+      `<option value="${i}">${o.kind === 'group' ? `${o.count}x ${o.name}` : `${o.season} ${o.name}`}</option>`).join('');
+    $('modalAwardsSelect').hidden = false;
+    $('modalAwardsApply').hidden = false;
+    $('modalAwardsApply').disabled = false;
+  };
+  $('modalAwardsApply').onclick = () => {
+    const o = modalAwardOptions[+$('modalAwardsSelect').value];
+    if (!o) return;
+    modalSplitKey = o.kind === 'group'
+      ? `award:group:${encodeURIComponent(o.name)}:${o.count}`
+      : `award:single:${encodeURIComponent(o.name)}:${o.season}`;
+    $('modalSplit').querySelectorAll('.modal-split-btn').forEach(x => x.classList.remove('active'));
+    $('modalCareerSplit').querySelectorAll('.modal-split-btn').forEach(x => x.classList.remove('active'));
+    $('modalTeamRow').querySelectorAll('.modal-team-btn').forEach(x => x.classList.remove('active'));
+    $('modalComparisons').querySelectorAll('.modal-split-btn').forEach(x => x.classList.remove('active'));
+    clearSeasonCheckboxes();
+    pushSplit(pid, modalSplitKey);
+  };
+
   function clearYearCheckboxesOnly() {
     modalSelectedYears.clear();
     $('modalSeasonsRow').querySelectorAll('.modal-year-btn').forEach(x => x.classList.remove('active'));
@@ -2265,6 +2376,11 @@ function splitDisplayName(splitKey, isPitcher) {
   if (splitKey.startsWith('rank:')) {
     const [, scope, catEnc, rankNum] = splitKey.split(':');
     return `${ordinal(+rankNum)} in ${rankScopeLabel(scope)} in ${decodeURIComponent(catEnc)}`;
+  }
+  if (splitKey.startsWith('award:')) {
+    const [, kind, nameEnc, valueRaw] = splitKey.split(':');
+    const name = decodeURIComponent(nameEnc);
+    return kind === 'group' ? `${valueRaw}x ${name}` : `${valueRaw} ${name}`;
   }
   if (splitKey.startsWith('posrank:')) {
     const [, position, posKind, direction, rankNum] = splitKey.split(':');
@@ -3769,6 +3885,7 @@ function splitNeedsLiveRefresh(splitKey) {
   if (splitKey.startsWith('stat:')) return false;
   if (splitKey.startsWith('team:')) return false;
   if (splitKey.startsWith('rank:')) return false;
+  if (splitKey.startsWith('award:')) return false;
   if (splitKey.startsWith('posrank:')) return false;
   if (splitKey === 'yankstad:career') return false;
   if (splitKey.startsWith('range:')) return splitKey.slice(6).split(':')[1] === new Date().toISOString().slice(0, 10);
